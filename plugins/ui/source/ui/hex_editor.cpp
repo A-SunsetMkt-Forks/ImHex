@@ -9,7 +9,7 @@
 
 #include <wolv/utils/guards.hpp>
 
-#include <fonts/codicons_font.h>
+#include <fonts/vscode_icons.hpp>
 #include <hex/providers/buffered_reader.hpp>
 
 namespace hex::ui {
@@ -21,7 +21,8 @@ namespace hex::ui {
         DataVisualizerAscii() : DataVisualizer("ASCII", 1, 1) { }
 
         void draw(u64 address, const u8 *data, size_t size, bool upperCase) override {
-            hex::unused(address, upperCase);
+            std::ignore = address;
+            std::ignore = upperCase;
 
             if (size == 1) {
                 const char c = char(data[0]);
@@ -37,7 +38,9 @@ namespace hex::ui {
         }
 
         bool drawEditing(u64 address, u8 *data, size_t size, bool upperCase, bool startedEditing) override {
-            hex::unused(address, startedEditing, upperCase);
+            std::ignore = address;
+            std::ignore = startedEditing;
+            std::ignore = upperCase;
 
             if (size == 1) {
                 struct UserData {
@@ -278,7 +281,7 @@ namespace hex::ui {
 
 
 
-    void HexEditor::drawCell(u64 address, const u8 *data, size_t size, bool hovered, CellType cellType) {
+    void HexEditor::drawCell(u64 address, u8 *data, size_t size, bool hovered, CellType cellType) {
         static DataVisualizerAscii asciiVisualizer;
 
         if (m_shouldUpdateEditingValue && address == m_editingAddress) {
@@ -300,6 +303,7 @@ namespace hex::ui {
                     std::reverse(buffer.begin(), buffer.begin() + size);
 
                 m_currDataVisualizer->draw(address, buffer.data(), size, m_upperCaseHex);
+
             } else {
                 asciiVisualizer.draw(address, data, size, m_upperCaseHex);
             }
@@ -316,6 +320,7 @@ namespace hex::ui {
                         std::memcpy(m_editingBytes.data(), data, size);
                     else if (m_mode == Mode::Insert) {
                         std::memset(m_editingBytes.data(), 0x00, size);
+                        std::memset(data, 0x00, size);
                         m_provider->insert(address, size);
                     }
 
@@ -408,6 +413,26 @@ namespace hex::ui {
         }
     }
 
+    void HexEditor::drawSeparatorLine(u64 address, bool drawVerticalConnector) {
+        if (m_separatorStride == 0) return;
+
+        const u64 regionProgress = address % m_separatorStride;
+        const u64 cellsPerRow = m_bytesPerRow / m_currDataVisualizer->getBytesPerCell();
+        const auto table = ImGui::GetCurrentTable();
+        if (regionProgress < cellsPerRow) {
+            const auto rect = ImGui::TableGetCellBgRect(table, table->CurrentColumn);
+
+            const auto drawList = ImGui::GetWindowDrawList();
+
+            const auto lineColor = ImGui::GetColorU32(ImGuiCol_SeparatorActive);
+            drawList->AddLine(rect.Min, ImVec2(rect.Max.x, rect.Min.y), lineColor);
+            if (regionProgress == 0 && drawVerticalConnector) {
+                drawList->AddLine(ImFloor(rect.Min), ImFloor(ImVec2(rect.Min.x, rect.Max.y)), lineColor);
+            }
+        }
+    }
+
+
     void HexEditor::drawSelectionFrame(u32 x, u32 y, Region selection, u64 byteAddress, u16 bytesPerCell, const ImVec2 &cellPos, const ImVec2 &cellSize, const ImColor &backgroundColor) const {
         auto drawList = ImGui::GetWindowDrawList();
 
@@ -480,7 +505,7 @@ namespace hex::ui {
         m_frameStartSelectionRegion = selection;
 
         if (m_provider == nullptr || m_provider->getActualSize() == 0) {
-            ImGuiExt::TextFormattedCentered("{}", "hex.ui.hex_editor.no_bytes"_lang);
+            ImGuiExt::TextOverlay("hex.ui.hex_editor.no_bytes"_lang, ImGui::GetWindowPos() + ImGui::GetWindowSize() / 2, ImGui::GetWindowWidth() * 0.7);
         }
 
         if (!m_editingAddress.has_value() && ImGui::IsKeyPressed(ImGuiKey_Escape))
@@ -565,7 +590,14 @@ namespace hex::ui {
                         // Draw address column
                         ImGui::TableNextRow();
                         ImGui::TableNextColumn();
-                        ImGuiExt::TextFormatted(m_upperCaseHex ? "{:08X}: " : "{:08x}: ", y * m_bytesPerRow + m_provider->getBaseAddress() + m_provider->getCurrentPageAddress());
+
+                        const auto rowAddress = y * m_bytesPerRow + m_provider->getBaseAddress() + m_provider->getCurrentPageAddress();
+
+                        if (m_separatorStride > 0 && rowAddress % m_separatorStride < m_bytesPerRow && !ImGui::GetIO().KeyShift)
+                            ImGuiExt::TextFormattedColored(ImGui::GetStyleColorVec4(ImGuiCol_SeparatorActive), "{} {}", "hex.ui.common.segment"_lang, rowAddress / m_separatorStride);
+                        else
+                            ImGuiExt::TextFormatted(m_upperCaseHex ? "{:08X}: " : "{:08x}: ", rowAddress);
+
                         ImGui::TableNextColumn();
 
                         const u8 validBytes = std::min<u64>(m_bytesPerRow, m_provider->getSize() - y * m_bytesPerRow);
@@ -616,8 +648,11 @@ namespace hex::ui {
                             const u64 byteAddress = y * m_bytesPerRow + x * bytesPerCell + m_provider->getBaseAddress() + m_provider->getCurrentPageAddress();
 
                             ImGui::TableNextColumn();
-                            if (isColumnSeparatorColumn(x, columnCount))
+                            if (y != 0) drawSeparatorLine(byteAddress, x != 0);
+                            if (isColumnSeparatorColumn(x, columnCount)) {
                                 ImGui::TableNextColumn();
+                                if (y != 0) drawSeparatorLine(byteAddress, false);
+                            }
 
                             if (x < std::ceil(float(validBytes) / bytesPerCell)) {
                                 auto cellStartPos = getCellPosition();
@@ -679,6 +714,7 @@ namespace hex::ui {
                         ImGui::PopStyleVar();
 
                         ImGui::TableNextColumn();
+                        if (y != 0) drawSeparatorLine(y * m_bytesPerRow + m_provider->getBaseAddress() + m_provider->getCurrentPageAddress(), false);
                         ImGui::TableNextColumn();
 
                         // Draw ASCII column
@@ -691,9 +727,10 @@ namespace hex::ui {
                                 ImGui::TableNextRow();
 
                                 for (u64 x = 0; x < m_bytesPerRow; x++) {
-                                    ImGui::TableNextColumn();
-
                                     const u64 byteAddress = y * m_bytesPerRow + x + m_provider->getBaseAddress() + m_provider->getCurrentPageAddress();
+
+                                    ImGui::TableNextColumn();
+                                    if (y != 0) drawSeparatorLine(byteAddress, true);
 
                                     const auto cellStartPos = getCellPosition();
                                     const auto cellSize = CharacterSize + scaled(ImVec2(m_characterCellPadding, 0));
@@ -1028,6 +1065,11 @@ namespace hex::ui {
                             if (ImGui::SliderInt("##row_size", &bytesPerRow, 1, 128 / this->getBytesPerCell(), hex::format("{} {}", bytesPerRow * this->getBytesPerCell(), "hex.ui.hex_editor.columns"_lang).c_str())) {
                                 m_bytesPerRow = bytesPerRow * this->getBytesPerCell();
                                 m_encodingLineStartAddresses.clear();
+                            }
+                            {
+                                const u64 min = 0;
+                                const u64 max = m_provider->getActualSize();
+                                ImGui::SliderScalar("##separator_stride", ImGuiDataType_U64, &m_separatorStride, &min, &max, m_separatorStride == 0 ? "hex.ui.hex_editor.no_separator"_lang : hex::format("hex.ui.hex_editor.separator_stride"_lang, m_separatorStride).c_str());
                             }
                             ImGui::EndPopup();
                         }
